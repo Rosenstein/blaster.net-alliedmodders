@@ -31,6 +31,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Blaster.Valve\Blaster.Valve.csproj" />
     <ProjectReference Include="..\Blaster.Batch\Blaster.Batch.csproj" />
+    <ProjectReference Include="..\Blaster.CLI\Blaster.CLI.csproj" />
   </ItemGroup>
 
 </Project>

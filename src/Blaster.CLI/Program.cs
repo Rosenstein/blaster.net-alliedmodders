@@ -149,7 +149,7 @@ Options:
         var results = await querier.QueryServersAsync(appIds, skipInfo: skipInfo, skipRules: skipRules);
 
         var formatter = new OutputFormatter();
-        var output = formatter.Format(results, format);
-        Console.Write(output);
+        using var stdout = Console.OpenStandardOutput();
+        formatter.Write(results, format, stdout);
     }
 }

@@ -1,180 +1,189 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Blaster (C) Copyright 2014 AlliedModders LLC
 
+using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Blaster.Valve;
 
 namespace Blaster.CLI;
 
 /// <summary>
-/// Formats query results as JSON in various output modes.
+/// Formats query results as JSON in various output modes, streamed straight to the output with
+/// <see cref="Utf8JsonWriter"/> so large result sets don't materialise an entire node tree and string.
 /// </summary>
 public class OutputFormatter
 {
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true
-    };
+    private static readonly JsonWriterOptions WriterOptions = new() { Indented = true };
 
     /// <summary>
-    /// Formats results according to the specified format.
+    /// Writes the results to <paramref name="output"/> in the given format ("list", "map", or "lines").
+    /// </summary>
+    public void Write(List<QueryResult> results, string format, Stream output)
+    {
+        switch (format.ToLowerInvariant())
+        {
+            case "list":
+                WriteList(results, output);
+                break;
+            case "map":
+                WriteMap(results, output);
+                break;
+            case "lines":
+                WriteLines(results, output);
+                break;
+            default:
+                throw new ArgumentException($"Unknown format: {format}");
+        }
+    }
+
+    /// <summary>
+    /// Convenience overload that returns the formatted output as a string (used by tests / small sets).
     /// </summary>
     public string Format(List<QueryResult> results, string format)
     {
-        return format.ToLower() switch
-        {
-            "list" => FormatList(results),
-            "map" => FormatMap(results),
-            "lines" => FormatLines(results),
-            _ => throw new ArgumentException($"Unknown format: {format}")
-        };
+        using var stream = new MemoryStream();
+        Write(results, format, stream);
+        return Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    private string FormatList(List<QueryResult> results)
+    private static void WriteList(List<QueryResult> results, Stream output)
     {
-        var output = new JsonArray();
-
+        using var writer = new Utf8JsonWriter(output, WriterOptions);
+        writer.WriteStartArray();
         foreach (var result in results)
         {
-            output.Add((JsonNode?)FormatResult(result));
+            WriteResult(writer, result);
         }
-
-        return output.ToJsonString(JsonOptions);
+        writer.WriteEndArray();
+        writer.Flush();
     }
 
-    private string FormatMap(List<QueryResult> results)
+    private static void WriteMap(List<QueryResult> results, Stream output)
     {
-        var output = new JsonObject();
-
+        using var writer = new Utf8JsonWriter(output, WriterOptions);
+        writer.WriteStartObject();
         for (var i = 0; i < results.Count; i++)
         {
-            var result = results[i];
-            var key = result.Server ?? $"error_{i}";
-            output[key] = FormatResult(result);
+            writer.WritePropertyName(results[i].Server ?? $"error_{i}");
+            WriteResult(writer, results[i]);
         }
-
-        return output.ToJsonString(JsonOptions);
+        writer.WriteEndObject();
+        writer.Flush();
     }
 
-    private string FormatLines(List<QueryResult> results)
+    private static void WriteLines(List<QueryResult> results, Stream output)
     {
-        var lines = new List<string>();
-
+        // One compact JSON object per line (JSONL).
+        using var writer = new Utf8JsonWriter(output);
         foreach (var result in results)
         {
-            var obj = FormatResult(result);
-            lines.Add(obj.ToJsonString(JsonOptions));
+            writer.Reset(output);
+            WriteResult(writer, result);
+            writer.Flush();
+            output.WriteByte((byte)'\n');
         }
-
-        return string.Join("\n", lines);
     }
 
-    private JsonObject FormatResult(QueryResult result)
+    private static void WriteResult(Utf8JsonWriter writer, QueryResult result)
     {
-        var obj = new JsonObject();
+        writer.WriteStartObject();
 
         if (result.Server != null)
-            obj["server"] = result.Server;
+            writer.WriteString("server", result.Server);
 
         if (result.AppId != 0)
-            obj["appid"] = result.AppId;
+            writer.WriteNumber("appid", result.AppId);
 
         if (result.Info != null)
-            obj["info"] = FormatServerInfo(result.Info);
-        
-        if (result.InfoError != null)
-            obj["info_error"] = result.InfoError;
-
-        if (result.Rules != null && result.Rules.Count > 0)
         {
-            var rules = new JsonObject();
+            writer.WritePropertyName("info");
+            WriteServerInfo(writer, result.Info);
+        }
+
+        if (result.InfoError != null)
+            writer.WriteString("info_error", result.InfoError);
+
+        if (result.Rules is { Count: > 0 })
+        {
+            writer.WriteStartObject("rules");
             foreach (var (key, value) in result.Rules)
             {
-                rules[key] = value;
+                writer.WriteString(key, value);
             }
-
-            obj["rules"] = rules;
+            writer.WriteEndObject();
         }
-        
+
         if (result.RulesError != null)
-            obj["rules_error"] = result.RulesError;
+            writer.WriteString("rules_error", result.RulesError);
 
         if (result.Error != null)
-            obj["error"] = result.Error;
+            writer.WriteString("error", result.Error);
 
-        return obj;
+        writer.WriteEndObject();
     }
 
-    private JsonObject FormatServerInfo(ServerInfo info)
+    private static void WriteServerInfo(Utf8JsonWriter writer, ServerInfo info)
     {
-        var obj = new JsonObject();
+        writer.WriteStartObject();
 
-        obj["protocol"] = info.Protocol;
-        
+        writer.WriteNumber("protocol", info.Protocol);
+
         if (info.Name != null)
-            obj["name"] = info.Name;
-        
+            writer.WriteString("name", info.Name);
         if (info.MapName != null)
-            obj["map"] = info.MapName;
-        
+            writer.WriteString("map", info.MapName);
         if (info.Folder != null)
-            obj["folder"] = info.Folder;
-        
+            writer.WriteString("folder", info.Folder);
         if (info.Game != null)
-            obj["game"] = info.Game;
-        
-        obj["appid"] = JsonValue.Create((int)(info.Ext?.AppId ?? AppId.Unknown));
-        obj["players"] = info.Players;
-        obj["max_players"] = info.MaxPlayers;
-        obj["bots"] = info.Bots;
+            writer.WriteString("game", info.Game);
 
-        var typeValue = info.Type switch
+        writer.WriteNumber("appid", (int)(info.Ext?.AppId ?? AppId.Unknown));
+        writer.WriteNumber("players", info.Players);
+        writer.WriteNumber("max_players", info.MaxPlayers);
+        writer.WriteNumber("bots", info.Bots);
+
+        writer.WriteString("type", info.Type switch
         {
             ServerType.Dedicated => "d",
             ServerType.Listen => "l",
             ServerType.HLTV => "p",
-            _ => "u"
-        };
-        obj["type"] = typeValue;
+            _ => "u",
+        });
 
-        var osValue = info.OS switch
+        writer.WriteString("os", info.OS switch
         {
             ServerOS.Linux => "l",
             ServerOS.Windows => "w",
-            _ => "u"
-        };
-        obj["os"] = osValue;
+            _ => "u",
+        });
 
-        obj["visibility"] = info.Visibility;
-        obj["vac"] = info.Vac;
-        
+        writer.WriteNumber("visibility", info.Visibility);
+        writer.WriteNumber("vac", info.Vac);
+
         if (info.Ext?.GameVersion != null)
-            obj["version"] = info.Ext.GameVersion;
+            writer.WriteString("version", info.Ext.GameVersion);
 
         if (info.Mod != null)
         {
-            obj["mod"] = new JsonObject
-            {
-                ["url"] = info.Mod.Url,
-                ["download_url"] = info.Mod.DwlUrl,
-                ["version"] = info.Mod.Version,
-                ["size"] = info.Mod.Size,
-                ["type"] = info.Mod.Type,
-                ["dll"] = info.Mod.Dll
-            };
+            writer.WriteStartObject("mod");
+            writer.WriteString("url", info.Mod.Url);
+            writer.WriteString("download_url", info.Mod.DwlUrl);
+            writer.WriteNumber("version", info.Mod.Version);
+            writer.WriteNumber("size", info.Mod.Size);
+            writer.WriteNumber("type", info.Mod.Type);
+            writer.WriteNumber("dll", info.Mod.Dll);
+            writer.WriteEndObject();
         }
 
         if (info.TheShip != null)
         {
-            obj["the_ship"] = new JsonObject
-            {
-                ["mode"] = info.TheShip.Mode,
-                ["witnesses"] = info.TheShip.Witnesses,
-                ["duration"] = info.TheShip.Duration
-            };
+            writer.WriteStartObject("the_ship");
+            writer.WriteNumber("mode", info.TheShip.Mode);
+            writer.WriteNumber("witnesses", info.TheShip.Witnesses);
+            writer.WriteNumber("duration", info.TheShip.Duration);
+            writer.WriteEndObject();
         }
 
-        return obj;
+        writer.WriteEndObject();
     }
 }
