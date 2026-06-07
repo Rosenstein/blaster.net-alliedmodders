@@ -46,7 +46,7 @@ public class StatsCollector
         
         _db = new DatabaseConnection(connStr);
         _gameId = gameId;
-        _loggerFactory = loggerFactory ?? LoggerFactory.Create(builder => builder.AddConsole());
+        _loggerFactory = loggerFactory ?? LoggerFactory.Create(builder => builder.AddCompactConsole());
         _steamUsername = ResolveCredential(
             steamUsernameOverride,
             config,
@@ -184,11 +184,14 @@ public class StatsCollector
         var batch = new ServerStatsBatch(serverList);
         var liveServers = new ConcurrentBag<Server>();
 
+        // Report progress so the (otherwise silent) A2S pass doesn't look hung.
+        var progress = new ProgressLogger(_loggerFactory.CreateLogger<StatsCollector>(), serverList.Count);
+
         var processor = new BatchProcessor(item =>
         {
             if (item is ServerStatsItem serverItem)
             {
-                ProcessServer(serverItem, liveServers);
+                ProcessServer(serverItem, liveServers, progress);
             }
         }, maxTasks: 20);
 
@@ -202,20 +205,20 @@ public class StatsCollector
         }
     }
 
-    private void ProcessServer(ServerStatsItem item, ConcurrentBag<Server> liveServers)
+    private void ProcessServer(ServerStatsItem item, ConcurrentBag<Server> liveServers, ProgressLogger progress)
     {
         try
         {
             using (var querier = new ServerQuerier(item.Server, _timeout))
             {
                 var info = querier.QueryInfo();
-                
+
                 // Query rules
                 var rules = querier.QueryRules();
 
                 var server = new Server { Info = info, Rules = rules };
                 liveServers.Add(server);
-                
+
                 lock (_globalStats!)
                 {
                     _globalStats.AliveCount++;
@@ -229,6 +232,8 @@ public class StatsCollector
                 _globalStats.DeadCount++;
             }
         }
+
+        progress.Increment();
     }
 
     private void ProcessServerStats(Server server, IReadOnlyDictionary<string, ulong> preferredValveGameIds)

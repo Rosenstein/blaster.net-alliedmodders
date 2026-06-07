@@ -82,12 +82,15 @@ public class CliServerQuerier
             var serverList = allServers.ToList();
             var batch = new ServerBatch(serverList, appIds, skipInfo, skipRules);
 
+            // Report progress so the (otherwise silent) A2S pass doesn't look hung.
+            var progress = new ProgressLogger(_loggerFactory.CreateLogger<CliServerQuerier>(), serverList.Count);
+
             // Process servers concurrently
             var processor = new BatchProcessor(item =>
             {
                 if (item is ServerQueryItem queryItem)
                 {
-                    ProcessServer(queryItem, results, resultsLock);
+                    ProcessServer(queryItem, results, resultsLock, progress);
                 }
             }, maxTasks: _maxConcurrency);
 
@@ -108,7 +111,7 @@ public class CliServerQuerier
         return results;
     }
 
-    private void ProcessServer(ServerQueryItem item, List<QueryResult> results, object resultsLock)
+    private void ProcessServer(ServerQueryItem item, List<QueryResult> results, object resultsLock, ProgressLogger progress)
     {
         var result = new QueryResult
         {
@@ -143,6 +146,8 @@ public class CliServerQuerier
         {
             results.Add(result);
         }
+
+        progress.Increment();
     }
 }
 
