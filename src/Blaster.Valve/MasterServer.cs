@@ -13,13 +13,51 @@ namespace Blaster.Valve;
 /// <summary>
 /// Callback invoked with each batch of servers from the master server.
 /// </summary>
-public delegate Task MasterQueryCallback(IEnumerable<IPEndPoint> servers);
+public delegate Task MasterQueryCallback(IEnumerable<MasterServerEntry> servers);
+
+/// <summary>
+/// Overwrites the player, bot, and max-player counts on an A2S_INFO result with the values the Steam
+/// game master server (GMS) reports for that server. Both sources can be faked, but spoofing the GMS
+/// counts takes more effort than the counts a server hands back in its own A2S_INFO reply, so the GMS
+/// values are treated as authoritative. The A2S protocol carries these counts as single bytes, so the
+/// (in practice always smaller) GMS values are clamped to the byte range.
+/// </summary>
+internal static class AuthoritativeCounts
+{
+    public static void Apply(ServerInfo info, uint players, uint bots, uint maxPlayers)
+    {
+        info.Players = (byte)Math.Min(players, byte.MaxValue);
+        info.Bots = (byte)Math.Min(bots, byte.MaxValue);
+        info.MaxPlayers = (byte)Math.Min(maxPlayers, byte.MaxValue);
+    }
+}
+
+/// <summary>
+/// A directly-addressable game server returned by the master server, carrying the GMS-reported
+/// player/bot/max-player counts alongside the endpoint to query via UDP A2S.
+/// </summary>
+public sealed record MasterServerEntry(IPEndPoint EndPoint, uint Players, uint Bots, uint MaxPlayers)
+{
+    /// <summary>
+    /// Replaces the player, bot, and max-player counts on <paramref name="info"/> with this entry's GMS
+    /// counts, which are harder to spoof than the counts the server returns over A2S_INFO.
+    /// </summary>
+    public void ApplyAuthoritativeCounts(ServerInfo info) => AuthoritativeCounts.Apply(info, Players, Bots, MaxPlayers);
+}
 
 /// <summary>
 /// An SDR / fake-IP server (169.254.* address) discovered in the master results. These can't be reached
-/// by UDP A2S; they are queried via QueryByFakeIP, which needs the owning <see cref="AppId"/>.
+/// by UDP A2S; they are queried via QueryByFakeIP, which needs the owning <see cref="AppId"/>. The
+/// GMS-reported player/bot/max-player counts are carried so they can override the (equally spoofable)
+/// counts in the relayed ping reply.
 /// </summary>
-public sealed record FakeIpServer(IPEndPoint EndPoint, uint AppId);
+public sealed record FakeIpServer(IPEndPoint EndPoint, uint AppId, uint Players, uint Bots, uint MaxPlayers)
+{
+    /// <summary>
+    /// Replaces the player, bot, and max-player counts on <paramref name="info"/> with this server's GMS counts.
+    /// </summary>
+    public void ApplyAuthoritativeCounts(ServerInfo info) => AuthoritativeCounts.Apply(info, Players, Bots, MaxPlayers);
+}
 
 /// <summary>
 /// Selects how server lists are retrieved: a live Steam connection or the Steam Web API.
@@ -1051,14 +1089,14 @@ public class MasterServerQuerier : IDisposable
     }
 
     /// <summary>
-    /// Deduplicates servers and returns the new directly-addressable endpoints for the callback. SDR /
-    /// fake-IP (169.254.*) servers can't be reached by UDP A2S: when <see cref="IncludeFakeIp"/> is set
-    /// they're collected (with their app id) into <see cref="FakeIpServers"/> for QueryByFakeIP instead;
-    /// otherwise they're dropped.
+    /// Deduplicates servers and returns the new directly-addressable entries (endpoint plus GMS
+    /// player/bot counts) for the callback. SDR / fake-IP (169.254.*) servers can't be reached by UDP
+    /// A2S: when <see cref="IncludeFakeIp"/> is set they're collected (with their app id and GMS counts)
+    /// into <see cref="FakeIpServers"/> for QueryByFakeIP instead; otherwise they're dropped.
     /// </summary>
-    private List<IPEndPoint> FilterNewServers(uint appId, IEnumerable<MasterServerRecord> servers, HashSet<string> seen)
+    private List<MasterServerEntry> FilterNewServers(uint appId, IEnumerable<MasterServerRecord> servers, HashSet<string> seen)
     {
-        var newServers = new List<IPEndPoint>();
+        var newServers = new List<MasterServerEntry>();
 
         foreach (var record in servers)
         {
@@ -1069,14 +1107,14 @@ public class MasterServerQuerier : IDisposable
             {
                 if (_includeFakeIp && seen.Add(key))
                 {
-                    _fakeIpServers.Add(new FakeIpServer(server, appId));
+                    _fakeIpServers.Add(new FakeIpServer(server, appId, record.Players, record.Bots, record.MaxPlayers));
                 }
                 continue;
             }
 
             if (seen.Add(key))
             {
-                newServers.Add(server);
+                newServers.Add(new MasterServerEntry(server, record.Players, record.Bots, record.MaxPlayers));
             }
         }
 

@@ -80,7 +80,7 @@ public class MasterServerIntegrationTests : IDisposable
         // Act
         await querier.QueryAsync(async servers =>
         {
-            allServers.AddRange(servers);
+            allServers.AddRange(servers.Select(s => s.EndPoint));
         });
 
         // Assert
@@ -150,7 +150,7 @@ public class MasterServerIntegrationTests : IDisposable
         var servers = new List<IPEndPoint>();
         await querier.QueryAsync(async batch =>
         {
-            servers.AddRange(batch);
+            servers.AddRange(batch.Select(s => s.EndPoint));
         });
 
         // Assert

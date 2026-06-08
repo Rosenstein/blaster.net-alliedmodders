@@ -56,7 +56,9 @@ public class CliServerQuerier
 
         try
         {
-            var allServers = new HashSet<string>();
+            // Keyed by endpoint so the GMS-reported player/bot counts travel with each server into the
+            // A2S pass, where they override the server's own (more easily spoofable) counts.
+            var masterServers = new Dictionary<string, MasterServerEntry>();
             var fakeIpServers = new List<FakeIpServer>();
 
             // One querier kept alive for the whole run so fake-IP servers can be queried after the
@@ -74,7 +76,7 @@ public class CliServerQuerier
                     {
                         foreach (var server in servers)
                         {
-                            allServers.Add($"{server.Address}:{server.Port}");
+                            masterServers[server.EndPoint.ToString()] = server;
                         }
                         return Task.CompletedTask;
                     });
@@ -93,7 +95,7 @@ public class CliServerQuerier
                 }
             }
 
-            if (allServers.Count == 0 && fakeIpServers.Count == 0)
+            if (masterServers.Count == 0 && fakeIpServers.Count == 0)
             {
                 return results;
             }
@@ -102,12 +104,12 @@ public class CliServerQuerier
             // concurrently.
             var directTask = Task.Run(() =>
             {
-                if (allServers.Count == 0)
+                if (masterServers.Count == 0)
                 {
                     return;
                 }
 
-                var serverList = allServers.ToList();
+                var serverList = masterServers.Values.ToList();
                 var batch = new ServerBatch(serverList, appIds, skipInfo, skipRules);
 
                 // Report progress so the (otherwise silent) A2S pass doesn't look hung.
@@ -163,6 +165,8 @@ public class CliServerQuerier
                     var info = await querier.QueryFakeServerInfoAsync(fake);
                     if (info != null)
                     {
+                        // Trust the GMS player/bot counts over the relayed ping reply.
+                        fake.ApplyAuthoritativeCounts(info);
                         result.Info = info;
                     }
                     else
@@ -202,7 +206,10 @@ public class CliServerQuerier
                 {
                     try
                     {
-                        result.Info = querier.QueryInfo();
+                        var info = querier.QueryInfo();
+                        // Trust the GMS player/bot/max-player counts over the server's own A2S_INFO reply.
+                        item.Entry.ApplyAuthoritativeCounts(info);
+                        result.Info = info;
                     }
                     catch (Exception ex)
                     {
@@ -240,11 +247,13 @@ public class QueryResult
 }
 
 /// <summary>
-/// Item representing a single server to query.
+/// Item representing a single server to query. Carries the master-server entry so the GMS player/bot
+/// counts are available when the A2S reply comes back.
 /// </summary>
 public class ServerQueryItem
 {
-    public string Server { get; set; } = "";
+    public required MasterServerEntry Entry { get; init; }
+    public string Server => Entry.EndPoint.ToString();
     public int AppId { get; set; }
     public bool SkipInfo { get; set; }
     public bool SkipRules { get; set; }
@@ -257,17 +266,17 @@ public class ServerBatch : IBatch
 {
     private readonly List<ServerQueryItem> _items;
 
-    public ServerBatch(List<string> servers, int[] appIds, bool skipInfo, bool skipRules)
+    public ServerBatch(IEnumerable<MasterServerEntry> servers, int[] appIds, bool skipInfo, bool skipRules)
     {
         _items = new List<ServerQueryItem>();
-        
+
         foreach (var server in servers)
         {
             foreach (var appId in appIds)
             {
                 _items.Add(new ServerQueryItem
                 {
-                    Server = server,
+                    Entry = server,
                     AppId = appId,
                     SkipInfo = skipInfo,
                     SkipRules = skipRules

@@ -22,6 +22,12 @@ internal sealed class MasterServerRecord
     public string GameDir { get; init; } = "";
     public string Name { get; init; } = "";
     public string GameType { get; init; } = "";
+
+    /// <summary>
+    /// Live player count. On the GMS (CM) transport this comes from the response's <c>auth_players</c>
+    /// field (protobuf field 3) — the vestigial <c>players</c> field (field 8) is always 0. The Web API
+    /// exposes the same value under the name <c>players</c>. Either way this is the live count.
+    /// </summary>
     public uint Players { get; init; }
     public uint MaxPlayers { get; init; }
     public uint Bots { get; init; }
@@ -96,7 +102,8 @@ internal sealed class ServerQueryResponseCallback : CallbackMsg
                 GameDir = GmsParse.ResolveString(s.gamedir_str, s.gamedir_strindex, s.ShouldSerializegamedir_strindex(), strings),
                 Name = GmsParse.ResolveString(s.name_str, s.name_strindex, s.ShouldSerializename_strindex(), strings),
                 GameType = GmsParse.ResolveString(s.gametype_str, s.gametype_strindex, s.ShouldSerializegametype_strindex(), strings),
-                Players = s.players,
+                // auth_players (field 3) is the live count; the players field (field 8) is always 0.
+                Players = s.auth_players,
                 MaxPlayers = s.max_players,
                 Bots = s.bots,
                 AppId = s.app_id,

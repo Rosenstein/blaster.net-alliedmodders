@@ -187,8 +187,9 @@ public class StatsCollector
         };
         _runStamp = _globalStats.Stamp;
 
-        // Query master server and collect stats
-        var allServers = new HashSet<string>();
+        // Query master server and collect stats. Keyed by endpoint so the GMS-reported player/bot counts
+        // travel with each server into the A2S pass, where they override the server's own (more easily spoofable) counts.
+        var masterServers = new Dictionary<string, MasterServerEntry>();
         var fakeIpServers = new List<FakeIpServer>();
         var liveServers = new ConcurrentBag<Server>();
 
@@ -209,7 +210,7 @@ public class StatsCollector
             {
                 foreach (var server in servers)
                 {
-                    allServers.Add($"{server.Address}:{server.Port}");
+                    masterServers[server.EndPoint.ToString()] = server;
                 }
                 return Task.CompletedTask;
             }).Wait();
@@ -228,7 +229,7 @@ public class StatsCollector
         // Directly-addressable servers over UDP A2S, fake-IP servers over QueryByFakeIP — concurrently.
         var directTask = Task.Run(() =>
         {
-            var serverList = allServers.ToList();
+            var serverList = masterServers.Values.ToList();
 
             // Report progress so the (otherwise silent) A2S pass doesn't look hung.
             var progress = new ProgressLogger(_loggerFactory.CreateLogger<StatsCollector>(), serverList.Count);
@@ -264,6 +265,9 @@ public class StatsCollector
             using (var querier = new ServerQuerier(item.Server, _timeout))
             {
                 var info = querier.QueryInfo();
+
+                // Trust the GMS player/bot/max-player counts over the server's own A2S_INFO reply.
+                item.Entry.ApplyAuthoritativeCounts(info);
 
                 // Query rules
                 var rules = querier.QueryRules();
@@ -305,6 +309,9 @@ public class StatsCollector
                 }
                 else
                 {
+                    // Trust the GMS player/bot counts over the relayed ping reply.
+                    fake.ApplyAuthoritativeCounts(info);
+
                     var rules = await master.QueryFakeServerRulesAsync(fake) ?? new Dictionary<string, string>();
                     liveServers.Add(new Server { Info = info, Rules = rules });
                     lock (_globalStats!) { _globalStats.AliveCount++; }
@@ -799,11 +806,13 @@ internal class StatsKey
 }
 
 /// <summary>
-/// Batch item for server statistics collection.
+/// Batch item for server statistics collection. Carries the master-server entry so the GMS player/bot
+/// counts are available when the A2S reply comes back.
 /// </summary>
 internal class ServerStatsItem
 {
-    public string Server { get; set; } = "";
+    public required MasterServerEntry Entry { get; init; }
+    public string Server => Entry.EndPoint.ToString();
 }
 
 /// <summary>
@@ -813,9 +822,9 @@ internal class ServerStatsBatch : IBatch
 {
     private readonly List<ServerStatsItem> _items;
 
-    public ServerStatsBatch(List<string> servers)
+    public ServerStatsBatch(IEnumerable<MasterServerEntry> servers)
     {
-        _items = servers.Select(s => new ServerStatsItem { Server = s }).ToList();
+        _items = servers.Select(s => new ServerStatsItem { Entry = s }).ToList();
     }
 
     public object Item(int index) => _items[index];

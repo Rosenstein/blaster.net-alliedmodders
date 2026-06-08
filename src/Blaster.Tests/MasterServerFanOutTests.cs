@@ -32,7 +32,7 @@ public class MasterServerFanOutTests
         var delivered = new List<IPEndPoint>();
         await querier.QueryAsync(servers =>
         {
-            delivered.AddRange(servers);
+            delivered.AddRange(servers.Select(s => s.EndPoint));
             return Task.CompletedTask;
         });
 
