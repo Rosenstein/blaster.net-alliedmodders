@@ -17,6 +17,7 @@ It includes:
 - Added support for more games / mods
 - Updated CS:GO to its new app id and re-enabled it for querying
 - Filtered out SDR "fakeip" servers from querying by default; opt-in querying now supported via `--include-fakeip`
+- Filtered redirect/spam "server farms" out of master results (configurable via `--max-servers-per-host`)
 - Added `valve_game_id` and `last_seen` columns to AmStats schema
 
 ## Requirements
@@ -132,6 +133,7 @@ dotnet run --project src/Blaster.CLI -- --appids 240 --transport web-api
 | `--no-rules` | Skip A2S_RULES queries |
 | `--include-fakeip` | Opt-in: also query SDR/fake-IP (169.254.*) servers via QueryByFakeIP instead of dropping them; see [Fake-IP / SDR servers](#fake-ip--sdr-servers) |
 | `--concurrency <N>` | Max concurrent server queries (default: `20`) |
+| `--max-servers-per-host <N>` | Drop IPs advertising more than N servers as redirect/spam farms (or `BLASTER_MAX_SERVERS_PER_HOST`; default: `100`; `0` disables); see [Spam-farm filtering](#spam-farm-filtering) |
 | `--help` | Show help |
 
 ## Stats collector usage (`Blaster.AmStats`)
@@ -185,6 +187,9 @@ steam:
   # Optional — choose master-server transport. Values: steam (default), web-api
   # transport: web-api
   # webapi_key: YOURKEYHERE
+  # Optional — drop IPs advertising more than this many servers as redirect/spam farms
+  # (default: 100; 0 disables). See "Spam-farm filtering" below.
+  # max_servers_per_host: 100
 fakeip:
   # Optional — set to true to query SDR/fake-IP servers via QueryByFakeIP
   # enabled: false
@@ -204,6 +209,23 @@ Steam credentials, transport settings, and fake-IP behaviour for runtime can com
 ## Fake-IP / SDR servers
 
 Some Valve game servers are hosted behind Steam Datagram Relay (SDR) and advertise a link-local "fake IP" address in the 169.254.0.0/16 range. These addresses are unreachable over ordinary UDP, so Blaster drops them by default. Passing `--include-fakeip` opts in to querying them via `GameServers.QueryByFakeIP`, using whichever transport is selected (Steam CM connection or Web API). This fake-IP pass runs concurrently with the normal UDP A2S pass, so overall collection time is not significantly increased. For some games — TF2 is a prominent example — fake-IP servers are a large fraction of the total server population, and omitting them will materially under-count results.
+
+## Spam-farm filtering
+
+Valve master lists are heavily polluted with redirect "farms": a single IP answering on thousands of sequential ports, each impersonating a server, to flood the list and funnel players. Blaster flags these during the master fan-out, using the (harder-to-spoof) counts the GMS reports — no extra A2S query — with two signals:
+
+- **Port farm:** an IP advertising more than `max-servers-per-host` servers (default `100`) is treated as one operator stuffing the list, and the whole host is dropped.
+- **Impossible player count:** a server reporting more than 130 players is dropped on its own (no real Valve game is realistically this full — most cap at 64, TF2 ~100, GMod ~128), but its host is only condemned if it also trips the port-farm threshold, so a lone faker on a shared hosting IP doesn't take its legitimate neighbours down with it.
+
+Flagged hosts are dropped before they reach the output, and fed back into the fan-out as a master-server NOR exclusion so deeper queries stop returning them.
+
+**SDR / fake-IP (169.254.0.0/16) servers are exempt** from this filter: they legitimately share addresses across the SDR network, so they are never counted toward the per-host threshold or culled. (Whether they are queried at all is controlled separately by `--include-fakeip`; see [Fake-IP / SDR servers](#fake-ip--sdr-servers).)
+
+Configuration:
+
+- **CLI:** `--max-servers-per-host <N>` or `BLASTER_MAX_SERVERS_PER_HOST`.
+- **AmStats:** `steam.max_servers_per_host` in `config.yml` or `BLASTER_MAX_SERVERS_PER_HOST` (no CLI flag).
+- Default is `100`; set to `0` to disable the filter entirely.
 
 ## Master server transports
 

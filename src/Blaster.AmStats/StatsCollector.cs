@@ -4,6 +4,7 @@
 using Blaster.Batch;
 using Blaster.Valve;
 using System.Collections.Concurrent;
+using System.Net;
 using Microsoft.Extensions.Logging;
 
 namespace Blaster.AmStats;
@@ -22,6 +23,7 @@ public class StatsCollector
     private readonly string _steamPassword;
     private readonly string _webApiKey;
     private readonly bool _includeFakeIp;
+    private readonly int _maxServersPerHost;
     private readonly ILoggerFactory _loggerFactory;
 
     private readonly Dictionary<(string ModString, ulong ModGameId), GameMod> _mods = new();
@@ -59,6 +61,11 @@ public class StatsCollector
 
         _includeFakeIp = includeFakeIpOverride
             ?? (bool.TryParse(ResolveOptional(null, config, "fakeip.enabled", "BLASTER_FAKEIP"), out var fakeip) && fakeip);
+
+        _maxServersPerHost = int.TryParse(
+            ResolveOptional(null, config, "steam.max_servers_per_host", "BLASTER_MAX_SERVERS_PER_HOST"), out var mps)
+            ? mps
+            : ValveConstants.DefaultMaxServersPerHost;
 
         if (_transport == MasterServerTransport.WebApi)
         {
@@ -197,6 +204,7 @@ public class StatsCollector
         // same connection/source during the batch phase.
         using var master = CreateMasterQuerier();
         master.IncludeFakeIp = _includeFakeIp;
+        master.MaxServersPerHost = _maxServersPerHost;
 
         try
         {
@@ -225,6 +233,10 @@ public class StatsCollector
             Console.Error.WriteLine($"Master server error: {ex.Message}");
             throw;
         }
+
+        // Drop servers on spam-farm hosts the master querier flagged (most are never collected, but a host
+        // can be flagged after some of its servers were already received here).
+        PruneSpamHosts(masterServers, master.SpamHosts);
 
         // Directly-addressable servers over UDP A2S, fake-IP servers over QueryByFakeIP — concurrently.
         var directTask = Task.Run(() =>
@@ -256,6 +268,24 @@ public class StatsCollector
         {
             ProcessServerStats(server, preferredValveGameIds);
         }
+    }
+
+    private void PruneSpamHosts(Dictionary<string, MasterServerEntry> servers, IReadOnlyCollection<IPAddress> spamHosts)
+    {
+        if (spamHosts.Count == 0)
+        {
+            return;
+        }
+
+        var spam = spamHosts as ISet<IPAddress> ?? spamHosts.ToHashSet();
+        var doomed = servers.Where(kv => spam.Contains(kv.Value.EndPoint.Address)).Select(kv => kv.Key).ToList();
+        foreach (var key in doomed)
+        {
+            servers.Remove(key);
+        }
+
+        _loggerFactory.CreateLogger<StatsCollector>().LogInformation(
+            "Spam filter: {Hosts} farm host(s); dropped {Dropped} already-collected server(s).", spam.Count, doomed.Count);
     }
 
     private void ProcessServer(ServerStatsItem item, ConcurrentBag<Server> liveServers, ProgressLogger progress)

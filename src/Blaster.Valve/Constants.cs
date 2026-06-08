@@ -23,6 +23,20 @@ public static class ValveConstants
     // Steam's limit per query
     public const uint MaxServersPerQuery = 10000;
 
+    // A host (IP) advertising more than this many servers is treated as a redirect/spam farm: its
+    // servers are dropped and the host is excluded from further fan-out. <= 0 disables the spam filter.
+    public const int DefaultMaxServersPerHost = 100;
+
+    // A server reporting a GMS player count above this is treated as fake. No real Valve game is
+    // realistically this populated: most cap at 64 (+ SourceTV/replay), TF2 ~100, GMod ~128. SDK mods
+    // can raise the engine limit toward 255 but are never realistically this full.
+    public const uint MaxRealisticPlayers = 130;
+
+    // Upper bound on how many spam-host \gameaddr\ conditions are packed into one NOR when feeding
+    // discovered farms back into the fan-out, to keep the filter string within the master server's
+    // length limit. (A NOR over gameaddr needs >= 2 distinct IPs to be honoured at all.)
+    public const int MaxSpamNorHosts = 24;
+
     // Retry policy for the rate-limited Steam GMS master-server queries. A timeout or transient
     // error is retried rather than silently dropping a whole fan-out bucket.
     public const int MasterQueryMaxAttempts = 3;

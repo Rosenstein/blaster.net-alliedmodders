@@ -514,6 +514,8 @@ public class MasterServerQuerier : IDisposable
     private readonly List<uint> _appIds = [];
     private readonly List<FakeIpServer> _fakeIpServers = [];
     private bool _includeFakeIp;
+    private int _maxServersPerHost = ValveConstants.DefaultMaxServersPerHost;
+    private SpamHostTracker _spamTracker = new(ValveConstants.DefaultMaxServersPerHost, ValveConstants.MaxRealisticPlayers);
     private readonly ILogger<MasterServerQuerier>? _logger;
     private FanOutStats? _stats;
     private int _runQueries;
@@ -545,6 +547,24 @@ public class MasterServerQuerier : IDisposable
 
     /// <summary>Fake-IP servers collected during the most recent <see cref="QueryAsync"/> run.</summary>
     public IReadOnlyList<FakeIpServer> FakeIpServers => _fakeIpServers;
+
+    /// <summary>
+    /// A host (IP) advertising more than this many servers is treated as a redirect/spam farm: its
+    /// servers are dropped and the host is fed back into the fan-out as a NOR exclusion. Set to 0 (or
+    /// less) to disable the spam filter. Defaults to <see cref="ValveConstants.DefaultMaxServersPerHost"/>.
+    /// </summary>
+    public int MaxServersPerHost
+    {
+        get => _maxServersPerHost;
+        set => _maxServersPerHost = value;
+    }
+
+    /// <summary>
+    /// Hosts identified as spam farms during the most recent <see cref="QueryAsync"/> run. Consumers
+    /// should drop any servers they collected on these IPs — a host can be flagged after some of its
+    /// servers were already streamed to the callback.
+    /// </summary>
+    public IReadOnlyCollection<IPAddress> SpamHosts => _spamTracker.SpamHosts;
 
     public MasterServerQuerier(string? cellIdFilePath = null, string? username = null, string? password = null, ILogger<MasterServerQuerier>? logger = null)
     {
@@ -675,6 +695,7 @@ public class MasterServerQuerier : IDisposable
         _runQueries = 0;
         _runCapHits = 0;
         _fakeIpServers.Clear();
+        _spamTracker = new SpamHostTracker(_maxServersPerHost, ValveConstants.MaxRealisticPlayers);
 
         _logger?.LogInformation("Starting query for {Count} app IDs: {AppIds}",
             _appIds.Count, string.Join(", ", _appIds));
@@ -703,7 +724,7 @@ public class MasterServerQuerier : IDisposable
         try
         {
             // Tier 1: single broad query.
-            var tier1Results = await QuerySourceAsync(appId, BuildFilter(appId, ["\\gametype\\valve"], []));
+            var tier1Results = await QuerySourceAsync(appId, ["\\gametype\\valve"], []);
             totalNew += await SendNewAsync(appId,tier1Results, seen, callback);
 
             if (tier1Results.Count < ValveConstants.MaxServersPerQuery)
@@ -714,7 +735,7 @@ public class MasterServerQuerier : IDisposable
             // Tier 2: split by empty×linux; any bucket that overflows escalates to the map tier.
             foreach (var (nor, and) in Tier2Specs)
             {
-                var bucket = await QuerySourceAsync(appId, BuildFilter(appId, nor, and));
+                var bucket = await QuerySourceAsync(appId, nor, and);
                 totalNew += await SendNewAsync(appId,bucket, seen, callback);
 
                 if (bucket.Count >= ValveConstants.MaxServersPerQuery)
@@ -744,9 +765,16 @@ public class MasterServerQuerier : IDisposable
     /// Issues a master query through the source and records it against the current per-app
     /// <see cref="FanOutStats"/>, categorising by the kind of selector in the filter.
     /// </summary>
-    private async Task<IReadOnlyList<MasterServerRecord>> QuerySourceAsync(uint appId, string filter)
+    private async Task<IReadOnlyList<MasterServerRecord>> QuerySourceAsync(uint appId, string[] nor, string[] and)
     {
-        var results = await _source.QueryWithFilterAsync(appId, filter);
+        // Feed discovered spam farms back into the query as a NOR exclusion so deeper-tier queries stop
+        // returning them (and are less likely to hit the cap). Skipped when the query already positively
+        // selects hosts by \gameaddr\ (IP enumeration), to avoid NOR-ing a host we are enumerating.
+        var andHasGameAddr = Array.Exists(and, a => a.Contains("\\gameaddr\\"));
+        var spamNor = SpamNorConditions(andHasGameAddr);
+        var effectiveNor = spamNor.Length > 0 ? [.. nor, .. spamNor] : nor;
+
+        var results = await _source.QueryWithFilterAsync(appId, BuildFilter(appId, effectiveNor, and));
 
         if (_stats is { } stats)
         {
@@ -755,20 +783,24 @@ public class MasterServerQuerier : IDisposable
             {
                 stats.CapHits++;
             }
-            if (filter.Contains("\\or\\"))
+
+            // Categorise on the caller's own conditions, not the spam-augmented wire filter, so the
+            // injected \gameaddr\ NOR doesn't make every query look like an IP-enumeration query.
+            var selectors = string.Concat(nor) + string.Concat(and);
+            if (selectors.Contains("\\or\\"))
             {
                 stats.OrBatchQueries++;
             }
 
-            if (filter.Contains("\\gameaddr\\"))
+            if (selectors.Contains("\\gameaddr\\"))
             {
                 stats.GameAddrQueries++;
             }
-            else if (filter.Contains("\\name_match\\"))
+            else if (selectors.Contains("\\name_match\\"))
             {
                 stats.NameQueries++;
             }
-            else if (filter.Contains("\\map\\"))
+            else if (selectors.Contains("\\map\\"))
             {
                 stats.MapQueries++;
             }
@@ -779,6 +811,28 @@ public class MasterServerQuerier : IDisposable
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Up to <see cref="ValveConstants.MaxSpamNorHosts"/> <c>\gameaddr\</c> NOR conditions for the spam
+    /// farms found so far — or none when the filter is disabled, when the query already selects by
+    /// <c>\gameaddr\</c>, or when fewer than two farms are known (a single-IP gameaddr NOR is silently
+    /// dropped by the master server and returns nothing).
+    /// </summary>
+    private string[] SpamNorConditions(bool andHasGameAddr)
+    {
+        if (!_spamTracker.Enabled || andHasGameAddr)
+        {
+            return [];
+        }
+
+        var hosts = _spamTracker.TopSpamHosts(ValveConstants.MaxSpamNorHosts);
+        var conditions = new string[hosts.Count];
+        for (var i = 0; i < hosts.Count; i++)
+        {
+            conditions[i] = $"\\gameaddr\\{hosts[i]}";
+        }
+        return conditions;
     }
 
     /// <summary>
@@ -831,7 +885,7 @@ public class MasterServerQuerier : IDisposable
 
         // Catch-all: everything in this bucket that isn't on one of the handled maps.
         string[] catchAllNor = [..nor, ..handledMaps.Select(m => $"\\map\\{m}")];
-        var rest = await QuerySourceAsync(appId, BuildFilter(appId, catchAllNor, and));
+        var rest = await QuerySourceAsync(appId, catchAllNor, and);
         totalNew += await SendNewAsync(appId,rest, seen, callback);
 
         if (rest.Count >= ValveConstants.MaxServersPerQuery)
@@ -898,7 +952,7 @@ public class MasterServerQuerier : IDisposable
             }
 
             // Re-query the bucket with the folded clusters excluded to see what remains.
-            var remainder = await QuerySourceAsync(appId, BuildFilter(appId, effectiveNor, stuckAnd));
+            var remainder = await QuerySourceAsync(appId, effectiveNor, stuckAnd);
             totalNew += await SendNewAsync(appId,remainder, seen, callback);
             if (remainder.Count >= ValveConstants.MaxServersPerQuery)
             {
@@ -936,7 +990,7 @@ public class MasterServerQuerier : IDisposable
         // Catch-all: names under this prefix whose next char wasn't in the sample (long tail), plus
         // names exactly equal to namePrefix.
         string[] catchAllNor = [..nor, ..selectors.Select(s => s.Item1)];
-        var catchAll = await QuerySourceAsync(appId, BuildFilter(appId, catchAllNor, stuckAnd));
+        var catchAll = await QuerySourceAsync(appId, catchAllNor, stuckAnd);
         total += await SendNewAsync(appId,catchAll, seen, callback);
         if (catchAll.Count >= ValveConstants.MaxServersPerQuery)
         {
@@ -1045,7 +1099,7 @@ public class MasterServerQuerier : IDisposable
             ? [..baseAnd, batch[0].Condition]
             : [..baseAnd, $"\\or\\{batch.Count}{string.Concat(batch.Select(b => b.Condition))}"];
 
-        var results = await QuerySourceAsync(appId, BuildFilter(appId, nor, and));
+        var results = await QuerySourceAsync(appId, nor, and);
         var newCount = await SendNewAsync(appId,results, seen, callback);
 
         if (results.Count < ValveConstants.MaxServersPerQuery)
@@ -1103,6 +1157,9 @@ public class MasterServerQuerier : IDisposable
             var server = record.EndPoint;
             var key = server.ToString();
 
+            // SDR / fake-IP (169.254.0.0/16) servers are handled here and never reach the spam filter
+            // below: they legitimately share addresses across the SDR network, so per-host server counts
+            // are meaningless for them and they must not be culled as "farms".
             if (FakeIpMapper.IsFakeIp(server.Address))
             {
                 if (_includeFakeIp && seen.Add(key))
@@ -1112,7 +1169,10 @@ public class MasterServerQuerier : IDisposable
                 continue;
             }
 
-            if (seen.Add(key))
+            // Count this newly-seen host and drop it if it's a spam farm (or a single server reporting an
+            // impossible player count). A host can be flagged after earlier servers were already emitted;
+            // those are pruned by the consumer via SpamHosts.
+            if (seen.Add(key) && _spamTracker.Observe(server.Address, record.Players))
             {
                 newServers.Add(new MasterServerEntry(server, record.Players, record.Bots, record.MaxPlayers));
             }

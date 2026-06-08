@@ -27,6 +27,7 @@ public class MasterServerFanOutTests
     {
         var sim = new SimulatedMasterServer(population);
         var querier = new MasterServerQuerier(sim);
+        querier.MaxServersPerHost = 0; // these tests exercise fan-out completeness with farm-shaped data
         querier.FilterAppIds(TestApp);
 
         var delivered = new List<IPEndPoint>();
@@ -248,6 +249,8 @@ internal sealed class SimulatedMasterServer : IMasterQuerySource
                 Name = s.Name,
                 Map = s.Map,
                 AppId = s.AppId,
+                Players = (uint)s.Players,
+                MaxPlayers = (uint)s.MaxPlayers,
             })
             .ToList();
 

@@ -23,6 +23,7 @@ internal class Program
             string? webApiKey = null;
             var transport = "steam";
             var includeFakeIp = false;
+            int? maxServersPerHost = null;
 
             int i = 0;
             while (i < args.Length)
@@ -87,6 +88,10 @@ internal class Program
                     case "--include-fakeip":
                         includeFakeIp = true;
                         break;
+                    case "--max-servers-per-host":
+                        if (i + 1 < args.Length && int.TryParse(args[++i], out var mps))
+                            maxServersPerHost = mps;
+                        break;
                     case "--help":
                     case "-h":
                         ShowHelp();
@@ -106,6 +111,12 @@ internal class Program
             webApiKey ??= Environment.GetEnvironmentVariable("BLASTER_STEAM_WEBAPI_KEY");
             steamUsername ??= Environment.GetEnvironmentVariable("BLASTER_STEAM_USERNAME");
             steamPassword ??= Environment.GetEnvironmentVariable("BLASTER_STEAM_PASSWORD");
+
+            if (maxServersPerHost is null
+                && int.TryParse(Environment.GetEnvironmentVariable("BLASTER_MAX_SERVERS_PER_HOST"), out var envMps))
+            {
+                maxServersPerHost = envMps;
+            }
 
             if (transportMode == MasterServerTransport.WebApi)
             {
@@ -128,7 +139,7 @@ internal class Program
                 builder.SetMinimumLevel(logLevel)
                        .AddCompactConsole()))
             {
-                await HandleCommand(appIds.ToArray(), format, skipInfo, skipRules, concurrency, transportMode, steamUsername, steamPassword, webApiKey, includeFakeIp, loggerFactory);
+                await HandleCommand(appIds.ToArray(), format, skipInfo, skipRules, concurrency, transportMode, steamUsername, steamPassword, webApiKey, includeFakeIp, maxServersPerHost ?? ValveConstants.DefaultMaxServersPerHost, loggerFactory);
             }
             return 0;
         }
@@ -159,6 +170,8 @@ Options:
   --no-rules             Skip rules queries
   --include-fakeip       Also include SDR / fake-IP servers, queried via QueryByFakeIP
   --concurrency <N>      Max concurrent servers to query (default: 20)
+  --max-servers-per-host <N>  Treat an IP with more than N servers as a spam/redirect farm and drop it
+                              (or BLASTER_MAX_SERVERS_PER_HOST; default: 100; 0 disables)
   --help                 Show this help message
 ");
     }
@@ -174,9 +187,10 @@ Options:
         string? steamPassword,
         string? webApiKey,
         bool includeFakeIp,
+        int maxServersPerHost,
         ILoggerFactory loggerFactory)
     {
-        var querier = new CliServerQuerier(concurrency, transport, steamUsername, steamPassword, webApiKey, includeFakeIp, loggerFactory);
+        var querier = new CliServerQuerier(concurrency, transport, steamUsername, steamPassword, webApiKey, includeFakeIp, loggerFactory, maxServersPerHost);
         var results = await querier.QueryServersAsync(appIds, skipInfo: skipInfo, skipRules: skipRules);
 
         var formatter = new OutputFormatter();

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Blaster (C) Copyright 2014 AlliedModders LLC
 
+using System.Net;
 using Blaster.Batch;
 using Blaster.Valve;
 using Microsoft.Extensions.Logging;
@@ -18,6 +19,7 @@ public class CliServerQuerier
     private readonly string? _steamPassword;
     private readonly string? _webApiKey;
     private readonly bool _includeFakeIp;
+    private readonly int _maxServersPerHost;
     private readonly ILoggerFactory _loggerFactory;
 
     public CliServerQuerier(
@@ -27,7 +29,8 @@ public class CliServerQuerier
         string? steamPassword,
         string? webApiKey,
         bool includeFakeIp,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        int maxServersPerHost = ValveConstants.DefaultMaxServersPerHost)
     {
         _maxConcurrency = maxConcurrency;
         _transport = transport;
@@ -35,15 +38,18 @@ public class CliServerQuerier
         _steamPassword = steamPassword;
         _webApiKey = webApiKey;
         _includeFakeIp = includeFakeIp;
+        _maxServersPerHost = maxServersPerHost;
         _loggerFactory = loggerFactory;
     }
 
     private MasterServerQuerier CreateMasterQuerier()
     {
         var logger = _loggerFactory.CreateLogger<MasterServerQuerier>();
-        return _transport == MasterServerTransport.WebApi
+        var querier = _transport == MasterServerTransport.WebApi
             ? MasterServerQuerier.CreateWebApi(_webApiKey!, logger)
             : new MasterServerQuerier(username: _steamUsername, password: _steamPassword, logger: logger);
+        querier.MaxServersPerHost = _maxServersPerHost;
+        return querier;
     }
 
     /// <summary>
@@ -94,6 +100,10 @@ public class CliServerQuerier
                     }
                 }
             }
+
+            // Drop servers on spam-farm hosts the master querier flagged. Most are never emitted, but a
+            // host can be flagged after some of its servers were already collected here, so prune them.
+            PruneSpamHosts(masterServers, querier.SpamHosts);
 
             if (masterServers.Count == 0 && fakeIpServers.Count == 0)
             {
@@ -187,6 +197,24 @@ public class CliServerQuerier
 
             progress.Increment();
         }
+    }
+
+    private void PruneSpamHosts(Dictionary<string, MasterServerEntry> servers, IReadOnlyCollection<IPAddress> spamHosts)
+    {
+        if (spamHosts.Count == 0)
+        {
+            return;
+        }
+
+        var spam = spamHosts as ISet<IPAddress> ?? spamHosts.ToHashSet();
+        var doomed = servers.Where(kv => spam.Contains(kv.Value.EndPoint.Address)).Select(kv => kv.Key).ToList();
+        foreach (var key in doomed)
+        {
+            servers.Remove(key);
+        }
+
+        _loggerFactory.CreateLogger<CliServerQuerier>().LogInformation(
+            "Spam filter: {Hosts} farm host(s); dropped {Dropped} already-collected server(s).", spam.Count, doomed.Count);
     }
 
     private void ProcessServer(ServerQueryItem item, List<QueryResult> results, object resultsLock, ProgressLogger progress)
