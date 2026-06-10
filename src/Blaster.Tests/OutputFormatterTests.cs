@@ -37,7 +37,13 @@ public class OutputFormatterTests
                 Ext = new ExtendedInfo { AppId = (AppId)10, GameVersion = "1.0" },
             },
         },
-        new QueryResult { Server = "5.6.7.8:27016", AppId = 10, InfoError = "timeout" },
+        new QueryResult
+        {
+            Server = "5.6.7.8:27016",
+            AppId = 10,
+            InfoError = "timeout",
+            Rules = new Dictionary<string, string> { ["sv_gravity"] = "800", ["mp_timelimit"] = "30" },
+        },
     ];
 
     [Fact]
@@ -60,6 +66,22 @@ public class OutputFormatterTests
         Assert.Equal(5, info.GetProperty("players").GetInt32());
 
         Assert.Equal("timeout", doc.RootElement[1].GetProperty("info_error").GetString());
+    }
+
+    [Fact]
+    public void Rules_AreEmittedAsObjectWhenPopulated()
+    {
+        var json = new OutputFormatter().Format(Sample(), "list");
+        using var doc = JsonDocument.Parse(json);
+
+        // First server has no rules -> no "rules" property.
+        Assert.False(doc.RootElement[0].TryGetProperty("rules", out _));
+
+        // Second server carries rules -> emitted as a key/value object.
+        var rules = doc.RootElement[1].GetProperty("rules");
+        Assert.Equal(JsonValueKind.Object, rules.ValueKind);
+        Assert.Equal("800", rules.GetProperty("sv_gravity").GetString());
+        Assert.Equal("30", rules.GetProperty("mp_timelimit").GetString());
     }
 
     [Fact]

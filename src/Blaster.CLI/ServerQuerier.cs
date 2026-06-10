@@ -139,7 +139,7 @@ public class CliServerQuerier
 
             var fakeProgress = new ProgressLogger(
                 _loggerFactory.CreateLogger<CliServerQuerier>(), fakeIpServers.Count, "fake-IP servers");
-            var fakeIpTask = ProcessFakeIpServersAsync(querier, fakeIpServers, skipInfo, results, resultsLock, fakeProgress);
+            var fakeIpTask = ProcessFakeIpServersAsync(querier, fakeIpServers, skipInfo, skipRules, results, resultsLock, fakeProgress);
 
             await Task.WhenAll(directTask, fakeIpTask);
         }
@@ -162,7 +162,7 @@ public class CliServerQuerier
     /// underlying transport serializes/throttles the calls itself.
     /// </summary>
     private static async Task ProcessFakeIpServersAsync(
-        MasterServerQuerier querier, List<FakeIpServer> servers, bool skipInfo, List<QueryResult> results, object resultsLock, ProgressLogger progress)
+        MasterServerQuerier querier, List<FakeIpServer> servers, bool skipInfo, bool skipRules, List<QueryResult> results, object resultsLock, ProgressLogger progress)
     {
         foreach (var fake in servers)
         {
@@ -187,6 +187,26 @@ public class CliServerQuerier
                 catch (Exception ex)
                 {
                     result.InfoError = $"QueryByFakeIP failed: {ex.Message}";
+                }
+            }
+
+            if (!skipRules)
+            {
+                try
+                {
+                    var rules = await querier.QueryFakeServerRulesAsync(fake);
+                    if (rules != null)
+                    {
+                        result.Rules = rules;
+                    }
+                    else
+                    {
+                        result.RulesError = "QueryByFakeIP returned no rules data";
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result.RulesError = $"QueryByFakeIP rules failed: {ex.Message}";
                 }
             }
 
@@ -242,6 +262,19 @@ public class CliServerQuerier
                     catch (Exception ex)
                     {
                         result.InfoError = $"Info query failed: {ex.Message}";
+                    }
+                }
+
+                // Query server rules
+                if (!item.SkipRules)
+                {
+                    try
+                    {
+                        result.Rules = querier.QueryRules();
+                    }
+                    catch (Exception ex)
+                    {
+                        result.RulesError = $"Rules query failed: {ex.Message}";
                     }
                 }
             }
